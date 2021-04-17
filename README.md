@@ -17,3 +17,7 @@ Set environment variables from 1Password Secure Notes
 % envop ${YOUR_ACCOUNT} aws printenv AWS_ACCESS_KEY_ID
 AKIA................
 ```
+
+## Acknowledgments
+- Functionality and command line interface are heavily inspired by [envchain](https://github.com/sorah/envchain)
+- envop-agent implementation is based on [ssh-agent of OpenSSH project](https://github.com/openssh/openssh-portable)
