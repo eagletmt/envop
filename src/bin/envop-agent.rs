@@ -1,7 +1,7 @@
 fn main() -> Result<(), anyhow::Error> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     unsafe {
-        libc::prctl(libc::PR_SET_DUMPABLE, 0);
+        disable_tracing();
         libc::setrlimit(
             libc::RLIMIT_CORE,
             &libc::rlimit {
@@ -68,6 +68,16 @@ fn main() -> Result<(), anyhow::Error> {
 
         Ok(())
     })
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn disable_tracing() {
+    libc::prctl(libc::PR_SET_DUMPABLE, 0);
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn disable_tracing() {
+    libc::ptrace(libc::PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0);
 }
 
 #[derive(Clone)]
