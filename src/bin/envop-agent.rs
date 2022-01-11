@@ -51,7 +51,8 @@ fn main() -> Result<(), anyhow::Error> {
         let incoming = {
             let uds = tokio::net::UnixListener::bind(&socket_path)?;
             async_stream::stream! {
-                while let item = uds.accept().map_ok(|(st, _)| UnixStream(st)).await {
+                loop {
+                    let item = uds.accept().map_ok(|(st, _)| UnixStream(st)).await;
                     yield item;
                 }
             }
@@ -299,10 +300,27 @@ async fn shutdown() {
     tracing::info!("Got {}", sig);
 }
 
+// https://github.com/hyperium/tonic/blob/v0.6.2/examples/src/uds/server.rs
 #[derive(Debug)]
 struct UnixStream(tokio::net::UnixStream);
 
-impl tonic::transport::server::Connected for UnixStream {}
+impl tonic::transport::server::Connected for UnixStream {
+    type ConnectInfo = UdsConnectInfo;
+
+    fn connect_info(&self) -> Self::ConnectInfo {
+        UdsConnectInfo {
+            peer_addr: self.0.peer_addr().ok().map(std::sync::Arc::new),
+            peer_cred: self.0.peer_cred().ok(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct UdsConnectInfo {
+    peer_addr: Option<std::sync::Arc<tokio::net::unix::SocketAddr>>,
+    peer_cred: Option<tokio::net::unix::UCred>,
+}
 
 impl tokio::io::AsyncRead for UnixStream {
     fn poll_read(
