@@ -83,7 +83,7 @@ unsafe fn disable_tracing() {
 #[derive(Clone)]
 struct Token {
     account: String,
-    token: String,
+    token: secrecy::Secret<String>,
 }
 
 #[derive(Default)]
@@ -121,7 +121,8 @@ impl envop::agent_server::Agent for Agent {
             .await
             .map_err(|e| tonic::Status::internal(format!("Failed to wait op(1) process: {}", e)))?;
         if output.status.success() {
-            let token = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            let token =
+                secrecy::Secret::new(String::from_utf8_lossy(&output.stdout).trim().to_owned());
             {
                 let mut token_ptr = self.token.lock().map_err(|e| {
                     tonic::Status::internal(format!("Failed to lock internal token: {}", e))
@@ -177,8 +178,9 @@ impl envop::agent_server::Agent for Agent {
         };
         let session_name = format!("OP_SESSION_{}", token.account);
 
+        use secrecy::ExposeSecret as _;
         let output = tokio::process::Command::new("op")
-            .env(&session_name, &token.token)
+            .env(&session_name, token.token.expose_secret())
             .arg("list")
             .arg("items")
             .arg("--vault")
@@ -212,7 +214,7 @@ impl envop::agent_server::Agent for Agent {
             .filter(|item_summary| item_summary.overview.title == message.name)
         {
             let output = std::process::Command::new("op")
-                .env(&session_name, &token.token)
+                .env(&session_name, token.token.expose_secret())
                 .arg("get")
                 .arg("item")
                 .arg("--vault")
