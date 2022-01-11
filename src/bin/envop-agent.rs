@@ -112,7 +112,7 @@ impl envop::agent_server::Agent for Agent {
         {
             let mut stdin = child.stdin.take().unwrap();
             stdin
-                .write_all(&message.password.as_bytes())
+                .write_all(message.password.as_bytes())
                 .await
                 .map_err(|e| tonic::Status::internal(format!("Failed to write password: {}", e)))?;
         }
