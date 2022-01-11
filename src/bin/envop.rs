@@ -1,5 +1,8 @@
 fn main() -> Result<(), anyhow::Error> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    if std::env::var_os("RUST_LOG").is_none() {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    tracing_subscriber::fmt::init();
 
     let mut args = std::env::args();
     let me = args.next().unwrap();

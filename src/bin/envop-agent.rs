@@ -1,5 +1,8 @@
 fn main() -> Result<(), anyhow::Error> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    if std::env::var_os("RUST_LOG").is_none() {
+        std::env::set_var("RUST_LOG", "info");
+    }
+    tracing_subscriber::fmt::init();
     unsafe {
         disable_tracing();
         libc::setrlimit(
@@ -55,16 +58,12 @@ fn main() -> Result<(), anyhow::Error> {
         };
         nix::sys::stat::umask(old_umask);
 
-        log::info!(
-            "Starting server {} (pid: {})",
-            socket_path.display(),
-            child_pid,
-        );
+        tracing::info!(socket_path = %socket_path.display(), %child_pid, "Starting server");
         tonic::transport::Server::builder()
             .add_service(envop::agent_server::AgentServer::new(Agent::default()))
             .serve_with_incoming_shutdown(incoming, shutdown())
             .await?;
-        log::info!("Exiting");
+        tracing::info!("Exiting");
 
         Ok(())
     })
@@ -132,14 +131,14 @@ impl envop::agent_server::Agent for Agent {
                     token,
                 });
             }
-            log::info!("Token was refreshed");
+            tracing::info!("Token was refreshed");
             Ok(tonic::Response::new(envop::SignInResponse {
                 ok: true,
                 error: "".to_owned(),
             }))
         } else {
             let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            log::info!("SignIn was failed: {}", error);
+            tracing::info!(%error, "SignIn was failed");
             Ok(tonic::Response::new(envop::SignInResponse {
                 ok: false,
                 error,
@@ -241,7 +240,7 @@ impl envop::agent_server::Agent for Agent {
                     if field.k == "string" || field.k == "concealed" {
                         credentials.insert(field.t, field.v);
                     } else {
-                        log::info!("Ignoring field {} in item {}", field.t, item_summary.uuid);
+                        tracing::info!(field = %field.t, item = %item_summary.uuid, "Ignoring unknown field in item");
                     }
                 }
             }
@@ -297,7 +296,7 @@ async fn shutdown() {
         _ = sigint.recv() => "SIGINT",
         _ = sigterm.recv() => "SIGTERM",
     };
-    log::info!("Got {}", sig);
+    tracing::info!("Got {}", sig);
 }
 
 #[derive(Debug)]
