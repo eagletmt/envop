@@ -60,10 +60,10 @@ async fn get_credentials(
         return Ok(resp);
     }
 
-    let password = rpassword::read_password_from_tty(Some(&format!(
+    let password = rpassword::prompt_password(format!(
         "Enter password for 1Password ({}): ",
         request.account
-    )))?;
+    ))?;
     let resp = client
         .sign_in(tonic::Request::new(envop::SignInRequest {
             account: request.account.clone(),
