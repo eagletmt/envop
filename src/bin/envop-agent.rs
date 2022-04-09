@@ -1,8 +1,16 @@
+#[derive(Debug, structopt::StructOpt)]
+struct Opt {
+    #[structopt(long, help = "You have installed 1Password CLI v1 (legacy)")]
+    use_1password_cli_v1: bool,
+}
+
 fn main() -> Result<(), anyhow::Error> {
     if std::env::var_os("RUST_LOG").is_none() {
         std::env::set_var("RUST_LOG", "info");
     }
     tracing_subscriber::fmt::init();
+    use structopt::StructOpt as _;
+    let opt = Opt::from_args();
     unsafe {
         disable_tracing();
         libc::setrlimit(
@@ -61,7 +69,7 @@ fn main() -> Result<(), anyhow::Error> {
 
         tracing::info!(socket_path = %socket_path.display(), %child_pid, "Starting server");
         tonic::transport::Server::builder()
-            .add_service(envop::agent_server::AgentServer::new(Agent::default()))
+            .add_service(envop::agent_server::AgentServer::new(Agent::new(opt)))
             .serve_with_incoming_shutdown(incoming, shutdown())
             .await?;
         tracing::info!("Exiting");
@@ -86,9 +94,190 @@ struct Token {
     token: secrecy::Secret<String>,
 }
 
-#[derive(Default)]
 struct Agent {
     token: std::sync::Arc<std::sync::Mutex<Option<Token>>>,
+    use_1password_cli_v1: bool,
+}
+
+impl Agent {
+    fn new(opt: Opt) -> Self {
+        Self {
+            token: Default::default(),
+            use_1password_cli_v1: opt.use_1password_cli_v1,
+        }
+    }
+
+    async fn get_credentials_v1(
+        &self,
+        token: Token,
+        vault: &str,
+        tags: &str,
+        name: &str,
+    ) -> Result<tonic::Response<envop::GetCredentialsResponse>, tonic::Status> {
+        use secrecy::ExposeSecret as _;
+        let session_name = format!("OP_SESSION_{}", token.account);
+        let output = tokio::process::Command::new("op")
+            .env(&session_name, token.token.expose_secret())
+            .arg("list")
+            .arg("items")
+            .arg("--vault")
+            .arg(&vault)
+            .arg("--categories")
+            .arg("Secure Note")
+            .arg("--tags")
+            .arg(&tags)
+            .output()
+            .await
+            .map_err(|e| tonic::Status::internal(format!("Failed to spawn op(1): {}", e)))?;
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            return Ok(tonic::Response::new(envop::GetCredentialsResponse {
+                ok: false,
+                error,
+                ..Default::default()
+            }));
+        }
+
+        let item_summaries: Vec<ItemSummaryV1> =
+            serde_json::from_slice(&output.stdout).map_err(|e| {
+                tonic::Status::internal(format!(
+                    "Failed to deserialize `op list items` output: {}",
+                    e
+                ))
+            })?;
+        let mut credentials = std::collections::HashMap::new();
+        for item_summary in item_summaries
+            .into_iter()
+            .filter(|item_summary| item_summary.overview.title == name)
+        {
+            let output = std::process::Command::new("op")
+                .env(&session_name, token.token.expose_secret())
+                .arg("get")
+                .arg("item")
+                .arg("--vault")
+                .arg(&vault)
+                .arg(&item_summary.uuid)
+                .output()?;
+            if !output.status.success() {
+                eprintln!("`op get item {}` failed", item_summary.uuid);
+                let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                return Ok(tonic::Response::new(envop::GetCredentialsResponse {
+                    ok: false,
+                    error,
+                    ..Default::default()
+                }));
+            }
+            let item: ItemV1 = serde_json::from_slice(&output.stdout).map_err(|e| {
+                tonic::Status::internal(format!(
+                    "Failed to deserialize `op get item` output: {}",
+                    e
+                ))
+            })?;
+            for section in item.details.sections.into_iter() {
+                for field in section.fields.into_iter() {
+                    if field.k == "string" || field.k == "concealed" {
+                        credentials.insert(field.t, field.v);
+                    } else {
+                        tracing::info!(field = %field.t, item = %item_summary.uuid, "Ignoring unknown field in item");
+                    }
+                }
+            }
+        }
+
+        Ok(tonic::Response::new(envop::GetCredentialsResponse {
+            ok: true,
+            credentials,
+            ..Default::default()
+        }))
+    }
+
+    async fn get_credentials_v2(
+        &self,
+        token: Token,
+        vault: &str,
+        tags: &str,
+        name: &str,
+    ) -> Result<tonic::Response<envop::GetCredentialsResponse>, tonic::Status> {
+        use secrecy::ExposeSecret as _;
+        let session_name = format!("OP_SESSION_{}", token.account);
+        let output = tokio::process::Command::new("op")
+            .env(&session_name, token.token.expose_secret())
+            .arg("item")
+            .arg("list")
+            .arg("--format")
+            .arg("json")
+            .arg("--vault")
+            .arg(&vault)
+            .arg("--categories")
+            .arg("Secure Note")
+            .arg("--tags")
+            .arg(&tags)
+            .output()
+            .await
+            .map_err(|e| tonic::Status::internal(format!("Failed to spawn op(1): {}", e)))?;
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            return Ok(tonic::Response::new(envop::GetCredentialsResponse {
+                ok: false,
+                error,
+                ..Default::default()
+            }));
+        }
+
+        let item_summaries: Vec<ItemSummaryV2> =
+            serde_json::from_slice(&output.stdout).map_err(|e| {
+                tonic::Status::internal(format!(
+                    "Failed to deserialize `op item list` output: {}",
+                    e
+                ))
+            })?;
+        let mut credentials = std::collections::HashMap::new();
+        for item_summary in item_summaries
+            .into_iter()
+            .filter(|item_summary| item_summary.title == name)
+        {
+            let output = std::process::Command::new("op")
+                .env(&session_name, token.token.expose_secret())
+                .arg("item")
+                .arg("get")
+                .arg("--format")
+                .arg("json")
+                .arg("--vault")
+                .arg(&vault)
+                .arg(&item_summary.id)
+                .output()?;
+            if !output.status.success() {
+                eprintln!("`op item get {}` failed", item_summary.id);
+                let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                return Ok(tonic::Response::new(envop::GetCredentialsResponse {
+                    ok: false,
+                    error,
+                    ..Default::default()
+                }));
+            }
+            let item: ItemV2 = serde_json::from_slice(&output.stdout).map_err(|e| {
+                tonic::Status::internal(format!(
+                    "Failed to deserialize `op item get` output: {}",
+                    e
+                ))
+            })?;
+            for field in item.fields.into_iter() {
+                if let Some(value) = field.value {
+                    if field.type_ == "STRING" || field.type_ == "CONCEALED" {
+                        credentials.insert(field.label, value);
+                    } else {
+                        tracing::info!(field = %field.label, item = %item_summary.id, "Ignoring unknown field in item");
+                    }
+                }
+            }
+        }
+
+        Ok(tonic::Response::new(envop::GetCredentialsResponse {
+            ok: true,
+            credentials,
+            ..Default::default()
+        }))
+    }
 }
 
 #[tonic::async_trait]
@@ -100,9 +289,12 @@ impl envop::agent_server::Agent for Agent {
         use tokio::io::AsyncWriteExt as _;
 
         let message = request.into_inner();
-        let mut child = tokio::process::Command::new("op")
-            .arg("signin")
-            .arg("--raw")
+        let mut cmd = tokio::process::Command::new("op");
+        cmd.arg("signin").arg("--raw");
+        if !self.use_1password_cli_v1 {
+            cmd.arg("--account");
+        }
+        let mut child = cmd
             .arg(&message.account)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -176,87 +368,19 @@ impl envop::agent_server::Agent for Agent {
             }
             token_ptr.as_ref().unwrap().clone()
         };
-        let session_name = format!("OP_SESSION_{}", token.account);
 
-        use secrecy::ExposeSecret as _;
-        let output = tokio::process::Command::new("op")
-            .env(&session_name, token.token.expose_secret())
-            .arg("list")
-            .arg("items")
-            .arg("--vault")
-            .arg(&vault)
-            .arg("--categories")
-            .arg("Secure Note")
-            .arg("--tags")
-            .arg(&tags)
-            .output()
-            .await
-            .map_err(|e| tonic::Status::internal(format!("Failed to spawn op(1): {}", e)))?;
-        if !output.status.success() {
-            let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            return Ok(tonic::Response::new(envop::GetCredentialsResponse {
-                ok: false,
-                error,
-                ..Default::default()
-            }));
+        if self.use_1password_cli_v1 {
+            self.get_credentials_v1(token, vault, tags, &message.name)
+                .await
+        } else {
+            self.get_credentials_v2(token, vault, tags, &message.name)
+                .await
         }
-
-        let item_summaries: Vec<ItemSummary> =
-            serde_json::from_slice(&output.stdout).map_err(|e| {
-                tonic::Status::internal(format!(
-                    "Failed to deserialize `op list items` output: {}",
-                    e
-                ))
-            })?;
-        let mut credentials = std::collections::HashMap::new();
-        for item_summary in item_summaries
-            .into_iter()
-            .filter(|item_summary| item_summary.overview.title == message.name)
-        {
-            let output = std::process::Command::new("op")
-                .env(&session_name, token.token.expose_secret())
-                .arg("get")
-                .arg("item")
-                .arg("--vault")
-                .arg(&vault)
-                .arg(&item_summary.uuid)
-                .output()?;
-            if !output.status.success() {
-                eprintln!("`op get item {}` failed", item_summary.uuid);
-                let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-                return Ok(tonic::Response::new(envop::GetCredentialsResponse {
-                    ok: false,
-                    error,
-                    ..Default::default()
-                }));
-            }
-            let item: Item = serde_json::from_slice(&output.stdout).map_err(|e| {
-                tonic::Status::internal(format!(
-                    "Failed to deserialize `op get item` output: {}",
-                    e
-                ))
-            })?;
-            for section in item.details.sections.into_iter() {
-                for field in section.fields.into_iter() {
-                    if field.k == "string" || field.k == "concealed" {
-                        credentials.insert(field.t, field.v);
-                    } else {
-                        tracing::info!(field = %field.t, item = %item_summary.uuid, "Ignoring unknown field in item");
-                    }
-                }
-            }
-        }
-
-        Ok(tonic::Response::new(envop::GetCredentialsResponse {
-            ok: true,
-            credentials,
-            ..Default::default()
-        }))
     }
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct ItemSummary {
+struct ItemSummaryV1 {
     uuid: String,
     overview: ItemOverview,
 }
@@ -267,25 +391,44 @@ struct ItemOverview {
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct Item {
-    details: ItemDetails,
+struct ItemV1 {
+    details: ItemDetailsV1,
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct ItemDetails {
-    sections: Vec<ItemSection>,
+struct ItemDetailsV1 {
+    sections: Vec<ItemSectionV1>,
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct ItemSection {
-    fields: Vec<ItemField>,
+struct ItemSectionV1 {
+    fields: Vec<ItemFieldV1>,
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct ItemField {
+struct ItemFieldV1 {
     k: String,
     t: String,
     v: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ItemSummaryV2 {
+    id: String,
+    title: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ItemV2 {
+    fields: Vec<ItemFieldV2>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ItemFieldV2 {
+    #[serde(rename = "type")]
+    type_: String,
+    label: String,
+    value: Option<String>,
 }
 
 async fn shutdown() {
