@@ -1,6 +1,6 @@
-#[derive(Debug, structopt::StructOpt)]
+#[derive(Debug, clap::Parser)]
 struct Opt {
-    #[structopt(long, help = "You have installed 1Password CLI v1 (legacy)")]
+    #[clap(long, help = "You have installed 1Password CLI v1 (legacy)")]
     use_1password_cli_v1: bool,
 }
 
@@ -9,8 +9,8 @@ fn main() -> Result<(), anyhow::Error> {
         std::env::set_var("RUST_LOG", "info");
     }
     tracing_subscriber::fmt::init();
-    use structopt::StructOpt as _;
-    let opt = Opt::from_args();
+    use clap::Parser as _;
+    let opt = Opt::parse();
     unsafe {
         disable_tracing();
         libc::setrlimit(
