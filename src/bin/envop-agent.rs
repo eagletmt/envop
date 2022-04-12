@@ -54,23 +54,14 @@ fn main() -> Result<(), anyhow::Error> {
     let child_pid = std::process::id();
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        use futures::TryFutureExt as _;
-
-        let incoming = {
-            let uds = tokio::net::UnixListener::bind(&socket_path)?;
-            async_stream::stream! {
-                loop {
-                    let item = uds.accept().map_ok(|(st, _)| UnixStream(st)).await;
-                    yield item;
-                }
-            }
-        };
+        let uds = tokio::net::UnixListener::bind(&socket_path)?;
+        let uds_stream = tokio_stream::wrappers::UnixListenerStream::new(uds);
         nix::sys::stat::umask(old_umask);
 
         tracing::info!(socket_path = %socket_path.display(), %child_pid, "Starting server");
         tonic::transport::Server::builder()
             .add_service(envop::agent_server::AgentServer::new(Agent::new(opt)))
-            .serve_with_incoming_shutdown(incoming, shutdown())
+            .serve_with_incoming_shutdown(uds_stream, shutdown())
             .await?;
         tracing::info!("Exiting");
 
@@ -441,60 +432,4 @@ async fn shutdown() {
         _ = sigterm.recv() => "SIGTERM",
     };
     tracing::info!("Got {}", sig);
-}
-
-// https://github.com/hyperium/tonic/blob/v0.6.2/examples/src/uds/server.rs
-#[derive(Debug)]
-struct UnixStream(tokio::net::UnixStream);
-
-impl tonic::transport::server::Connected for UnixStream {
-    type ConnectInfo = UdsConnectInfo;
-
-    fn connect_info(&self) -> Self::ConnectInfo {
-        UdsConnectInfo {
-            peer_addr: self.0.peer_addr().ok().map(std::sync::Arc::new),
-            peer_cred: self.0.peer_cred().ok(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct UdsConnectInfo {
-    peer_addr: Option<std::sync::Arc<tokio::net::unix::SocketAddr>>,
-    peer_cred: Option<tokio::net::unix::UCred>,
-}
-
-impl tokio::io::AsyncRead for UnixStream {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
-    }
-}
-
-impl tokio::io::AsyncWrite for UnixStream {
-    fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        std::pin::Pin::new(&mut self.0).poll_write(cx, buf)
-    }
-
-    fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.0).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.0).poll_shutdown(cx)
-    }
 }
