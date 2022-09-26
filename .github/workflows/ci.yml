@@ -21,6 +21,9 @@ jobs:
           profile: minimal
           toolchain: stable
       - uses: Swatinem/rust-cache@v1
+      - uses: arduino/setup-protoc@v1
+        with:
+          version: '3.x'
       - name: Run cargo test
         uses: actions-rs/cargo@v1
         with:
