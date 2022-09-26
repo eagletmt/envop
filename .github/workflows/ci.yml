@@ -44,6 +44,9 @@ jobs:
         with:
           command: fmt
           args: --all -- --check
+      - uses: arduino/setup-protoc@v1
+        with:
+          version: '3.x'
       - name: Run cargo clippy
         uses: actions-rs/cargo@v1
         with:
