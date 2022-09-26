@@ -2,6 +2,12 @@
 struct Opt {
     #[clap(long, help = "You have installed 1Password CLI v1 (legacy)")]
     use_1password_cli_v1: bool,
+    #[clap(
+        short,
+        long,
+        help = "Bind the envop-agent to the UNIX-domain socket. When this option is given, daemonize is skipped"
+    )]
+    bind_address: Option<std::path::PathBuf>,
 }
 
 fn main() -> Result<(), anyhow::Error> {
@@ -23,47 +29,68 @@ fn main() -> Result<(), anyhow::Error> {
     }
 
     let old_umask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits(0o077).unwrap());
-    let socket_dir = tempfile::Builder::new().prefix("envop-agent-").tempdir()?;
-    let parent_pid = std::process::id();
-    let socket_path = socket_dir.path().join(format!("agent.{}.sock", parent_pid));
+    // Hold _socket_dir to keep temporary directory
+    let (_socket_dir, socket_path, pid) = if let Some(socket_path) = opt.bind_address {
+        let pid = std::process::id();
+        (None, socket_path, pid)
+    } else {
+        let socket_dir = tempfile::Builder::new().prefix("envop-agent-").tempdir()?;
+        let parent_pid = std::process::id();
+        let socket_path = socket_dir.path().join(format!("agent.{}.sock", parent_pid));
 
-    if let nix::unistd::ForkResult::Parent { child } = unsafe { nix::unistd::fork() }? {
-        println!(
-            "ENVOP_AGENT_SOCK={}; export ENVOP_AGENT_SOCK;",
-            socket_path.display()
-        );
-        println!("ENVOP_AGENT_PID={}; export ENVOP_AGENT_PID;", child);
-        std::process::exit(0);
-    }
+        // Perform daemonize
+        if let nix::unistd::ForkResult::Parent { child } = unsafe { nix::unistd::fork() }? {
+            println!(
+                "ENVOP_AGENT_SOCK={}; export ENVOP_AGENT_SOCK;",
+                socket_path.display()
+            );
+            println!("ENVOP_AGENT_PID={}; export ENVOP_AGENT_PID;", child);
+            std::process::exit(0);
+        }
 
-    nix::unistd::setsid()?;
-    std::env::set_current_dir("/")?;
-    let child_pid = std::process::id();
-    {
-        use std::os::unix::io::AsRawFd as _;
-        let stdin = std::fs::File::open("/dev/null")?;
-        nix::unistd::dup2(stdin.as_raw_fd(), std::io::stdin().as_raw_fd())?;
-        let stdout =
-            std::fs::File::create(socket_dir.path().join(format!("stdout.{}.log", child_pid)))?;
-        let stderr =
-            std::fs::File::create(socket_dir.path().join(format!("stderr.{}.log", child_pid)))?;
-        nix::unistd::dup2(stdout.as_raw_fd(), std::io::stdout().as_raw_fd())?;
-        nix::unistd::dup2(stderr.as_raw_fd(), std::io::stderr().as_raw_fd())?;
-    }
+        nix::unistd::setsid()?;
+        std::env::set_current_dir("/")?;
+        let child_pid = std::process::id();
+        {
+            use std::os::unix::io::AsRawFd as _;
+            let dev_null = std::fs::File::open("/dev/null")?;
+            nix::unistd::dup2(dev_null.as_raw_fd(), std::io::stdin().as_raw_fd())?;
+            let stdout =
+                std::fs::File::create(socket_dir.path().join(format!("stdout.{}.log", child_pid)))?;
+            let stderr =
+                std::fs::File::create(socket_dir.path().join(format!("stderr.{}.log", child_pid)))?;
+            nix::unistd::dup2(stdout.as_raw_fd(), std::io::stdout().as_raw_fd())?;
+            nix::unistd::dup2(stderr.as_raw_fd(), std::io::stderr().as_raw_fd())?;
+        }
 
-    let child_pid = std::process::id();
+        let child_pid = std::process::id();
+        (Some(socket_dir), socket_path, child_pid)
+    };
+
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let uds = tokio::net::UnixListener::bind(&socket_path)?;
         let uds_stream = tokio_stream::wrappers::UnixListenerStream::new(uds);
         nix::sys::stat::umask(old_umask);
 
-        tracing::info!(socket_path = %socket_path.display(), %child_pid, "Starting server");
+        tracing::info!(socket_path = %socket_path.display(), %pid, "Starting server");
         tonic::transport::Server::builder()
-            .add_service(envop::agent_server::AgentServer::new(Agent::new(opt)))
+            .add_service(envop::agent_server::AgentServer::new(Agent::new(
+                AgentOptions {
+                    use_1password_cli_v1: opt.use_1password_cli_v1,
+                },
+            )))
             .serve_with_incoming_shutdown(uds_stream, shutdown())
             .await?;
         tracing::info!("Exiting");
+
+        if let Err(e) = std::fs::remove_file(&socket_path) {
+            tracing::warn!(
+                "failed to remove socket file {}: {}",
+                socket_path.display(),
+                e
+            );
+        }
 
         Ok(())
     })
@@ -90,8 +117,12 @@ struct Agent {
     use_1password_cli_v1: bool,
 }
 
+struct AgentOptions {
+    use_1password_cli_v1: bool,
+}
+
 impl Agent {
-    fn new(opt: Opt) -> Self {
+    fn new(opt: AgentOptions) -> Self {
         Self {
             token: Default::default(),
             use_1password_cli_v1: opt.use_1password_cli_v1,

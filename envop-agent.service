@@ -1,0 +1,9 @@
+[Unit]
+Description=envop agent
+
+[Service]
+# This unit file assumes envop-agent is installed to ~/.cargo/bin/envop-agent
+ExecStart=%h/.cargo/bin/envop-agent -b %t/envop-agent.sock
+
+[Install]
+WantedBy=default.target
